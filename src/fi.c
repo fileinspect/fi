@@ -11,18 +11,13 @@
 #include <time.h>
 
 // fi
+#include "fi/buffer.h"
 #include "fi/term.h"
 
 
 #define FI_VERSION "0.0.1"
 #define FI_TAB_STOP 2
 
-typedef struct ERow {
-  int size;
-  int rsize;
-  char* chars;
-  char* render;
-} ERow;
 
 typedef struct EditorConfig {
   int cx, cy;
@@ -32,7 +27,6 @@ typedef struct EditorConfig {
   unsigned short screenrows;
   unsigned short screencols;
   int numrows;
-  ERow* row;
   char* filename;
   char statusmsg[80];
   time_t statusmsg_time;
@@ -46,8 +40,7 @@ typedef struct ABuf {
 #define ABUF_INIT { NULL, 0 }
 
 EditorConfig E;
-
-int editorRowCxToRx(ERow* row, int cx);
+Buffer* buffer = NULL;
 
 void die(char const* s) {
   term_clear();
@@ -62,7 +55,7 @@ void die(char const* s) {
 void editorScroll() {
   E.rx = 0;
   if (E.cy < E.numrows) {
-    E.rx = editorRowCxToRx(&E.row[E.cy], E.cx);
+    E.rx = E.cx;
   }
 
   if (E.cy < E.rowoff) {
@@ -103,10 +96,14 @@ void editorDrawRows(void) {
         term_write_line(row, "~");
       }
     } else {
-      int len = E.row[filerow].rsize - E.coloff;
-      if (len < 0) len = 0;
+      size_t len = buffer_line_size(buffer, filerow);
+      if (len < (size_t)E.coloff) len = 0;
+      else len -= E.coloff;
       if (len > E.screencols) len = E.screencols;
-      term_write_line(row, &E.row[filerow].render[E.coloff]);
+      char* buf = malloc(sizeof(char) * (len + 1));
+      buffer_line_get(buffer, filerow, buf, len);
+      buf[len] = 0;
+      term_write_line(row, buf);
     }
   }
 }
@@ -166,14 +163,14 @@ void editorSetStatusMessage(char const* fmt, ...) {
 }
 
 void editorMoveCursor(TermKey key) {
-  ERow* row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];
+  size_t row_size = buffer_line_size(buffer, E.cy);
 
   switch (key) {
     case TermArrowLeft:
       if (E.cx != 0) --E.cx;
       break;
     case TermArrowRight:
-      if (row && E.cx < row->size) ++E.cx;
+      if ((size_t)E.cx < row_size) ++E.cx;
       break;
     case TermArrowUp:
       if (E.cy != 0) --E.cy;
@@ -183,10 +180,9 @@ void editorMoveCursor(TermKey key) {
       break;
   }
 
-  row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];
-  int rowlen = row ? row-> size : 0;
-  if (E.cx > rowlen) {
-    E.cx = rowlen;
+  row_size = buffer_line_size(buffer, E.cy);
+  if ((size_t)E.cx > row_size) {
+    E.cx = row_size;
   }
 }
 
@@ -205,7 +201,7 @@ void editorProcessKeypress() {
       break;
     case TermEnd:
       if (E.cy < E.numrows)
-        E.cx = E.row[E.cy].size;
+        E.cx = buffer_line_size(buffer, E.cy);
       break;
 
     case TermPageUp:
@@ -245,65 +241,15 @@ void initEditor() {
   E.rowoff = 0;
   E.coloff = 0;
   E.numrows = 0;
-  E.row = NULL;
   E.filename = NULL;
   E.statusmsg[0] = 0;
   E.statusmsg_time = 0;
 
+  buffer = buffer_alloc();
+
   if (term_size(&E.screenrows, &E.screencols) == TermFailure)
     die("term_size");
   E.screenrows -= 2;
-}
-
-int editorRowCxToRx(ERow* row, int cx) {
-  int rx = 0;
-  int col;
-  for (col = 0; col < cx; ++col) {
-    if (row->chars[col] == '\t')
-      rx += (FI_TAB_STOP - 1) - (rx % FI_TAB_STOP);
-    ++rx;
-  }
-  return rx;
-}
-
-void editorUpdateRow(ERow* row) {
-  int tabs = 0;
-  int col;
-
-  for (col = 0; col < row->size; ++col) {
-    if (row->chars[col] == '\t') ++tabs;
-  }
-
-  free(row->render);
-  row->render = malloc(row->size + tabs * (FI_TAB_STOP - 1) + 1);
-
-  int idx = 0;
-  for (col = 0; col < row->size; ++col) {
-    if (row->chars[col] == '\t') {
-    row->render[idx++] = ' ';
-    while (idx % FI_TAB_STOP != 0) row->render[idx++] = ' ';
-    } else {
-      row->render[idx++] = row->chars[col];
-    }
-  }
-  row->render[idx] = 0;
-  row->rsize = idx;
-}
-
-void editorAppendRow(char const* s, size_t len) {
-  E.row = realloc(E.row, sizeof(ERow) * (E.numrows + 1));
-
-  int at = E.numrows;
-  E.row[at].size = len;
-  E.row[at].chars = malloc(len + 1);
-  memcpy(E.row[at].chars, s, len);
-  E.row[at].chars[len] = 0;
-
-  E.row[at].rsize = 0;
-  E.row[at].render = NULL;
-  editorUpdateRow(&E.row[at]);
-
-  E.numrows++;
 }
 
 void editorOpen(char const* filename) {
@@ -322,7 +268,7 @@ void editorOpen(char const* filename) {
     while (linelen > 0 && (line[linelen - 1] == '\n' ||
                            line[linelen - 1] == '\r'))
       linelen--;
-    editorAppendRow(line, linelen);
+    buffer_line_insert(buffer, E.numrows++, line, linelen);
   }
   free(line);
   fclose(fp);
@@ -342,6 +288,9 @@ int main(int argc, char *argv[]) {
     editorRefreshScreen();
     editorProcessKeypress();
   }
+
+  buffer_free(buffer);
+  buffer = NULL;
 
   term_altscreen_disable();
   term_raw_disable();
