@@ -32,13 +32,6 @@ typedef struct EditorConfig {
   time_t statusmsg_time;
 } EditorConfig;
 
-typedef struct ABuf {
-  char *b;
-  int len;
-} ABuf;
-
-#define ABUF_INIT { NULL, 0 }
-
 EditorConfig E;
 Buffer* buffer = NULL;
 
@@ -228,10 +221,6 @@ void editorProcessKeypress() {
       editorMoveCursor(c);
       break;
   }
-}
-
-void abFree(ABuf *ab) {
-  free(ab->b);
 }
 
 void initEditor() {
